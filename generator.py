@@ -15,6 +15,7 @@ import requests
 import time
 from typing import Dict, List, Tuple
 import json
+import os
 
 from ecdsa.util import entropy_to_bits
 
@@ -192,7 +193,7 @@ def main():
     print("  • Most vulnerable period: May 2011 - March 2012 (P2PKH only)")
     print("  • Late vulnerable period: April 2012+ (P2PKH + P2SH)")
 
-    import os
+
 
     # Create and save wallet info to Desktop
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
